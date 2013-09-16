@@ -10,10 +10,10 @@ CREATE TABLE IF NOT EXISTS ``posts_{{ board }}`` (
    `body_nomarkup` text,
    `time` int(11) NOT NULL,
    `bump` int(11) DEFAULT NULL,
-   `thumb` varchar(50) DEFAULT NULL,
+   `thumb` varchar(255) DEFAULT NULL,
    `thumbwidth` int(11) DEFAULT NULL,
    `thumbheight` int(11) DEFAULT NULL,
-   `file` varchar(50) DEFAULT NULL,
+   `file` varchar(255) DEFAULT NULL,
    `filewidth` int(11) DEFAULT NULL,
    `fileheight` int(11) DEFAULT NULL,
    `filesize` int(11) DEFAULT NULL,
@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS ``posts_{{ board }}`` (
    `embed` text,
    UNIQUE KEY `id` (`id`),
    KEY `thread_id` (`thread`,`id`),
+   KEY `filehash` (`filehash`(40)),
    KEY `time` (`time`),
-   FULLTEXT KEY `body` (`body`)
+   KEY `ip` (`ip`),
+   KEY `list_threads` (`thread`, `sticky`, `bump`)
  ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 AUTO_INCREMENT=1 ;
  

@@ -9,6 +9,8 @@ if (realpath($_SERVER['SCRIPT_FILENAME']) == str_replace('\\', '/', __FILE__)) {
 	exit;
 }
 
+$microtime_start = microtime(true);
+
 require_once 'inc/display.php';
 require_once 'inc/template.php';
 require_once 'inc/database.php';
@@ -24,7 +26,7 @@ mb_internal_encoding('UTF-8');
 loadConfig();
 
 function loadConfig() {
-	global $board, $config, $__ip, $debug, $__version;
+	global $board, $config, $__ip, $debug, $__version, $microtime_start;
 
 	$error = function_exists('error') ? 'error' : 'basic_error_function_because_the_other_isnt_loaded_yet';
 
@@ -35,6 +37,7 @@ function loadConfig() {
 
 	$arrays = array(
 		'db',
+		'api',
 		'cache',
 		'cookies',
 		'error',
@@ -77,13 +80,6 @@ function loadConfig() {
 	if (!isset($__version))
 		$__version = file_exists('.installed') ? trim(file_get_contents('.installed')) : false;
 	$config['version'] = $__version;
-
-	if ($config['debug']) {
-		if (!isset($debug)) {
-			$debug = array('sql' => array(), 'exec' => array(), 'purge' => array(), 'cached' => array(), 'write' => array());
-			$debug['start'] = microtime(true);
-		}
-	}
 
 	date_default_timezone_set($config['timezone']);
 
@@ -153,6 +149,8 @@ function loadConfig() {
 		$config['url_javascript'] = $config['root'] . $config['file_script'];
 	if (!isset($config['additional_javascript_url']))
 		$config['additional_javascript_url'] = $config['root'];
+	if (!isset($config['uri_flags']))
+		$config['uri_flags'] = $config['root'] . 'static/flags/%s.png';
 
 	if ($config['root_file']) {
 		chdir($config['root_file']);
@@ -173,20 +171,20 @@ function loadConfig() {
 	if (preg_match('/^\:\:(ffff\:)?(\d+\.\d+\.\d+\.\d+)$/', $__ip, $m))
 		$_SERVER['REMOTE_ADDR'] = $m[2];
 
-	if (_setlocale(LC_ALL, $config['locale']) === false) {
-		$error('The specified locale (' . $config['locale'] . ') does not exist on your platform!');
+	if ($config['locale'] != 'en') {
+		if (_setlocale(LC_ALL, $config['locale']) === false) {
+			$error('The specified locale (' . $config['locale'] . ') does not exist on your platform!');
+		}
+		if (extension_loaded('gettext')) {
+			bindtextdomain('tinyboard', './inc/locale');
+			bind_textdomain_codeset('tinyboard', 'UTF-8');
+			textdomain('tinyboard');
+		} else {
+			_bindtextdomain('tinyboard', './inc/locale');
+			_bind_textdomain_codeset('tinyboard', 'UTF-8');
+			_textdomain('tinyboard');
+		}
 	}
-
-	if (extension_loaded('gettext')) {
-		bindtextdomain('tinyboard', './inc/locale');
-		bind_textdomain_codeset('tinyboard', 'UTF-8');
-		textdomain('tinyboard');
-	} else {
-		_bindtextdomain('tinyboard', './inc/locale');
-		_bind_textdomain_codeset('tinyboard', 'UTF-8');
-		_textdomain('tinyboard');
-	}
-
 
 	if ($config['syslog'])
 		openlog('tinyboard', LOG_ODELAY, LOG_SYSLOG); // open a connection to sysem logger
@@ -196,6 +194,25 @@ function loadConfig() {
 	if ($config['cache']['enabled'])
 		require_once 'inc/cache.php';
 	event('load-config');
+	
+	if ($config['debug']) {
+		if (!isset($debug)) {
+			$debug = array(
+				'sql' => array(),
+				'exec' => array(),
+				'purge' => array(),
+				'cached' => array(),
+				'write' => array(),
+				'time' => array(
+					'db_queries' => 0,
+					'exec' => 0,
+				),
+				'start' => $microtime_start,
+				'start_debug' => microtime(true)
+			);
+			$debug['start'] = $microtime_start;
+		}
+	}
 }
 
 function basic_error_function_because_the_other_isnt_loaded_yet($message, $priority = true) {
@@ -559,15 +576,20 @@ function listBoards() {
 function checkFlood($post) {
 	global $board, $config;
 
-	$query = prepare(sprintf("SELECT * FROM ``posts_%s`` WHERE (`ip` = :ip AND `time` >= :floodtime) OR (`ip` = :ip AND `body` != '' AND `body` = :body AND `time` >= :floodsameiptime) OR (`body` != ''  AND `body` = :body AND `time` >= :floodsametime) LIMIT 1", $board['uri']));
+	$query = prepare(sprintf("SELECT COUNT(*) FROM ``posts_%s`` WHERE
+		(`ip` = :ip AND `time` >= :floodtime)
+			OR
+		(`ip` = :ip AND :body != '' AND `body_nomarkup` = :body AND `time` >= :floodsameiptime)
+			OR
+		(:body != '' AND `body_nomarkup` = :body AND `time` >= :floodsametime) LIMIT 1", $board['uri']));
 	$query->bindValue(':ip', $_SERVER['REMOTE_ADDR']);
 	$query->bindValue(':body', $post['body']);
 	$query->bindValue(':floodtime', time()-$config['flood_time'], PDO::PARAM_INT);
 	$query->bindValue(':floodsameiptime', time()-$config['flood_time_ip'], PDO::PARAM_INT);
 	$query->bindValue(':floodsametime', time()-$config['flood_time_same'], PDO::PARAM_INT);
 	$query->execute() or error(db_error($query));
-
-	$flood = (bool) $query->fetch(PDO::FETCH_ASSOC);
+	
+	$flood = (bool) $query->fetchColumn();
 
 	if (event('check-flood', $post))
 		return true;
@@ -644,12 +666,12 @@ function checkBan($board = 0) {
 	if (event('check-ban', $board))
 		return true;
 
-	$query = prepare("SELECT `set`, `expires`, `reason`, `board`, `seen`, ``bans``.`id` FROM ``bans`` WHERE (`board` IS NULL OR `board` = :board) AND `ip` = :ip ORDER BY `expires` IS NULL DESC, `expires` DESC, `expires` DESC LIMIT 1");
+	$query = prepare("SELECT `set`, `expires`, `reason`, `board`, `seen`, `id` FROM ``bans`` WHERE (`board` IS NULL OR `board` = :board) AND `ip` = :ip ORDER BY `expires` IS NULL DESC, `expires` DESC LIMIT 1");
 	$query->bindValue(':ip', $_SERVER['REMOTE_ADDR']);
 	$query->bindValue(':board', $board);
 	$query->execute() or error(db_error($query));
 	if ($query->rowCount() < 1 && $config['ban_range']) {
-		$query = prepare("SELECT `set`, `expires`, `reason`, `board`, `seen`, ``bans``.`id` FROM ``bans`` WHERE (`board` IS NULL OR `board` = :board) AND :ip LIKE REPLACE(REPLACE(`ip`, '%', '!%'), '*', '%') ESCAPE '!' ORDER BY `expires` IS NULL DESC, `expires` DESC LIMIT 1");
+		$query = prepare("SELECT `set`, `expires`, `reason`, `board`, `seen`, `id` FROM ``bans`` WHERE (`board` IS NULL OR `board` = :board) AND :ip LIKE REPLACE(REPLACE(`ip`, '%', '!%'), '*', '%') ESCAPE '!' ORDER BY `expires` IS NULL DESC, `expires` DESC LIMIT 1");
 		$query->bindValue(':ip', $_SERVER['REMOTE_ADDR']);
 		$query->bindValue(':board', $board);
 		$query->execute() or error(db_error($query));
@@ -951,10 +973,13 @@ function deletePost($id, $error_if_doesnt_exist=true, $rebuild_after=true) {
 
 	// Delete posts and maybe replies
 	while ($post = $query->fetch(PDO::FETCH_ASSOC)) {
+		event('delete', $post);
+		
 		if (!$post['thread']) {
 			// Delete thread HTML page
 			file_unlink($board['dir'] . $config['dir']['res'] . sprintf($config['file_page'], $post['id']));
 			file_unlink($board['dir'] . $config['dir']['res'] . sprintf($config['file_page50'], $post['id']));
+			file_unlink($board['dir'] . $config['dir']['res'] . sprintf('%d.json', $post['id']));
 
 			$antispam_query = prepare('DELETE FROM ``antispam`` WHERE `board` = :board AND `thread` = :thread');
 			$antispam_query->bindValue(':board', $board['uri']);
@@ -981,7 +1006,7 @@ function deletePost($id, $error_if_doesnt_exist=true, $rebuild_after=true) {
 	$query->bindValue(':id', $id, PDO::PARAM_INT);
 	$query->execute() or error(db_error($query));
 
-	$query = prepare("SELECT `board`, `post` FROM ``cites`` WHERE `target_board` = :board AND (`target` = " . implode(' OR `target` = ', $ids) . ")");
+	$query = prepare("SELECT `board`, `post` FROM ``cites`` WHERE `target_board` = :board AND (`target` = " . implode(' OR `target` = ', $ids) . ") ORDER BY `board`");
 	$query->bindValue(':board', $board['uri']);
 	$query->execute() or error(db_error($query));
 	while ($cite = $query->fetch(PDO::FETCH_ASSOC)) {
@@ -996,13 +1021,13 @@ function deletePost($id, $error_if_doesnt_exist=true, $rebuild_after=true) {
 	if (isset($tmp_board))
 		openBoard($tmp_board);
 
-	$query = prepare("DELETE FROM ``cites`` WHERE (`target_board` = :board AND `target` = :id) OR (`board` = :board AND `post` = :id)");
+	$query = prepare("DELETE FROM ``cites`` WHERE (`target_board` = :board AND (`target` = " . implode(' OR `target` = ', $ids) . ")) OR (`board` = :board AND (`post` = " . implode(' OR `post` = ', $ids) . "))");
 	$query->bindValue(':board', $board['uri']);
-	$query->bindValue(':id', $id, PDO::PARAM_INT);
 	$query->execute() or error(db_error($query));
-
+	
 	if (isset($rebuild) && $rebuild_after) {
 		buildThread($rebuild);
+		buildIndex();
 	}
 
 	return true;
@@ -1050,13 +1075,9 @@ function index($page, $mod=false) {
 		return false;
 
 	$threads = array();
-
+	
 	while ($th = $query->fetch(PDO::FETCH_ASSOC)) {
-		$thread = new Thread(
-			$th['id'], $th['subject'], $th['email'], $th['name'], $th['trip'], $th['capcode'], $th['body'], $th['time'], $th['thumb'],
-			$th['thumbwidth'], $th['thumbheight'], $th['file'], $th['filewidth'], $th['fileheight'], $th['filesize'], $th['filename'], $th['ip'],
-			$th['sticky'], $th['locked'], $th['sage'], $th['embed'], $mod ? '?/' : $config['root'], $mod
-		);
+		$thread = new Thread($th, $mod ? '?/' : $config['root'], $mod);
 
 		if ($config['cache']['enabled'] && $cached = cache::get("thread_index_{$board['uri']}_{$th['id']}")) {
 			$replies = $cached['replies'];
@@ -1088,18 +1109,14 @@ function index($page, $mod=false) {
 			if ($po['file'])
 				$num_images++;
 
-			$thread->add(new Post(
-				$po['id'], $th['id'], $po['subject'], $po['email'], $po['name'], $po['trip'], $po['capcode'], $po['body'], $po['time'],
-				$po['thumb'], $po['thumbwidth'], $po['thumbheight'], $po['file'], $po['filewidth'], $po['fileheight'], $po['filesize'],
-				$po['filename'], $po['ip'], $po['embed'], $mod ? '?/' : $config['root'], $mod)
-			);
+			$thread->add(new Post($po, $mod ? '?/' : $config['root'], $mod));
 		}
 
 		if ($omitted) {
 			$thread->omitted = $omitted['post_count'] - ($th['sticky'] ? $config['threads_preview_sticky'] : $config['threads_preview']);
 			$thread->omitted_images = $omitted['image_count'] - $num_images;
 		}
-
+		
 		$threads[] = $thread;
 		$body .= $thread->build(true);
 	}
@@ -1223,14 +1240,11 @@ function checkRobot($body) {
 // Returns an associative array with 'replies' and 'images' keys
 function numPosts($id) {
 	global $board;
-	$query = prepare(sprintf("SELECT COUNT(*) FROM ``posts_%s`` WHERE `thread` = :thread UNION ALL SELECT COUNT(*) FROM ``posts_%s`` WHERE `file` IS NOT NULL AND `thread` = :thread", $board['uri'], $board['uri']));
+	$query = prepare(sprintf("SELECT COUNT(*) AS `replies`, COUNT(NULLIF(`file`, 0)) AS `images` FROM ``posts_%s`` WHERE `thread` = :thread", $board['uri'], $board['uri']));
 	$query->bindValue(':thread', $id, PDO::PARAM_INT);
 	$query->execute() or error(db_error($query));
 
-	$num_posts = $query->fetchColumn();
-	$num_images = $query->fetchColumn();
-
-	return array('replies' => $num_posts, 'images' => $num_images);
+	return $query->fetch(PDO::FETCH_ASSOC);
 }
 
 function muteTime() {
@@ -1303,13 +1317,16 @@ function buildIndex() {
 	if (!$config['try_smarter'])
 		$antibot = create_antibot($board['uri']);
 
-	$api = new Api();
-	$catalog = array();
+	if ($config['api']['enabled']) {
+		$api = new Api();
+		$catalog = array();
+	}
 
 	for ($page = 1; $page <= $config['max_pages']; $page++) {
 		$filename = $board['dir'] . ($page == 1 ? $config['file_index'] : sprintf($config['file_page'], $page));
 
-		if ($config['try_smarter'] && isset($build_pages) && count($build_pages) && !in_array($page, $build_pages) && is_file($filename))
+		if ($config['try_smarter'] && isset($build_pages) && !empty($build_pages)
+			&& !in_array($page, $build_pages) && is_file($filename))
 			continue;
 		$content = index($page);
 		if (!$content)
@@ -1326,29 +1343,39 @@ function buildIndex() {
 		$content['antibot'] = $antibot;
 
 		file_write($filename, Element('index.html', $content));
-
+		
 		// json api
-		$threads = $content['threads'];
-		$json = json_encode($api->translatePage($threads));
-		$jsonFilename = $board['dir'] . ($page-1) . ".json"; // pages should start from 0
-		file_write($jsonFilename, $json);
+		if ($config['api']['enabled']) {
+			$threads = $content['threads'];
+			$json = json_encode($api->translatePage($threads));
+			$jsonFilename = $board['dir'] . ($page - 1) . '.json'; // pages should start from 0
+			file_write($jsonFilename, $json);
 
-		$catalog[$page-1] = $threads; 
+			$catalog[$page-1] = $threads;
+		}
 	}
+
 	if ($page < $config['max_pages']) {
 		for (;$page<=$config['max_pages'];$page++) {
 			$filename = $board['dir'] . ($page==1 ? $config['file_index'] : sprintf($config['file_page'], $page));
 			file_unlink($filename);
 
-			$jsonFilename = $board['dir'] . ($page-1) . ".json";
-			file_unlink($jsonFilename);
+			if ($config['api']['enabled']) {
+				$jsonFilename = $board['dir'] . ($page - 1) . '.json';
+				file_unlink($jsonFilename);
+			}
 		}
 	}
 
 	// json api catalog
-	$json = json_encode($api->translateCatalog($catalog));
-	$jsonFilename = $board['dir'] . "catalog.json";
-	file_write($jsonFilename, $json);
+	if ($config['api']['enabled']) {
+		$json = json_encode($api->translateCatalog($catalog));
+		$jsonFilename = $board['dir'] . 'catalog.json';
+		file_write($jsonFilename, $json);
+	}
+
+	if ($config['try_smarter'])
+		$build_pages = array();
 }
 
 function buildJavascript() {
@@ -1496,54 +1523,34 @@ function unicodify($body) {
 	return $body;
 }
 
+function extract_modifiers($body) {
+	$modifiers = array();
+	
+	if (preg_match_all('@<tinyboard ([\w\s]+)>(.+?)</tinyboard>@us', $body, $matches, PREG_SET_ORDER)) {
+		foreach ($matches as $match) {
+			if (preg_match('/^escape /', $match[1]))
+				continue;
+			$modifiers[$match[1]] = html_entity_decode($match[2]);
+		}
+	}
+		
+	return $modifiers;
+}
+
 function markup(&$body, $track_cites = false) {
 	global $board, $config, $markup_urls;
+	
+	$modifiers = extract_modifiers($body);
+	
+	$body = preg_replace('@<tinyboard (?!escape )([\w\s]+)>(.+?)</tinyboard>@us', '', $body);
+	$body = preg_replace('@<(tinyboard) escape ([\w\s]+)>@i', '<$1 $2>', $body);
+	
+	if (isset($modifiers['raw html']) && $modifiers['raw html'] == '1') {
+		return array();
+	}
 
 	$body = str_replace("\r", '', $body);
 	$body = utf8tohtml($body);
-
-	if (preg_match_all('@&lt;tinyboard ([\w\s]+)&gt;(.+?)&lt;/tinyboard&gt;@us', $body, $modifiers, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
-		$skip_chars = 0;
-		$body_tmp = $body;
-		$end_markup = false;
-
-		foreach ($modifiers as $modifier) {
-			// preg_match_all is not multibyte-safe
-			foreach ($modifier as &$match) {
-				$match[1] = mb_strlen(substr($body_tmp, 0, $match[1]));
-			}
-
-			$modifier['type'] = $modifier[1][0];
-			$modifier['content'] = $modifier[2][0];
-
-			if ($modifier['type'] == 'ban message') {
-				// Public ban message
-				$replacement = sprintf($config['mod']['ban_message'], html_entity_decode($modifier['content']));
-				if ($end_markup) {
-					$body .= $replacement;
-				}
-			} elseif ($modifier['type'] == 'raw html') {
-				$body = html_entity_decode($modifier['content']);
-				$replacement = '';
-				$end_markup = true;
-			} elseif (preg_match('/^escape /', $modifier['type'])) {
-				// Escaped (not a real modifier)
-				$replacement = '&lt;tinyboard ' . substr($modifier['type'], strlen('escape ')) . '&gt;' . $modifier['content'] . '&lt;/tinyboard&gt;';
-			} else {
-				// Unknown
-				$replacement = '';
-			}
-
-			if (!$end_markup) {
-				$body = mb_substr_replace($body, $replacement, $modifier[0][1] + $skip_chars, mb_strlen($modifier[0][0]));
-				$skip_chars += mb_strlen($replacement) - mb_strlen($modifier[0][0]);
-			}
-		}
-
-		if ($end_markup) {
-			return array();
-		}
-	}
 
 	if (mysql_version() < 50503)
 		$body = mb_encode_numericentity($body, array(0x010000, 0xffffff, 0, 0xffffff), 'UTF-8');
@@ -1569,6 +1576,9 @@ function markup(&$body, $track_cites = false) {
 		if ($num_links > $config['max_links'])
 			error($config['error']['toomanylinks']);
 	}
+	
+	if ($config['markup_repair_tidy'])
+		$body = str_replace('  ', ' &nbsp;', $body);
 
 	if ($config['auto_unicode']) {
 		$body = unicodify($body);
@@ -1580,9 +1590,6 @@ function markup(&$body, $track_cites = false) {
 		}
 	}
 
-	// replace tabs with 8 spaces
-	$body = str_replace("\t", '        ', $body);
-
 	$tracked_cites = array();
 
 	// Cites
@@ -1593,29 +1600,41 @@ function markup(&$body, $track_cites = false) {
 
 		$skip_chars = 0;
 		$body_tmp = $body;
-
+		
+		$search_cites = array();
+		foreach ($cites as $matches) {
+			$search_cites[] = '`id` = ' . $matches[2][0];
+		}
+		$search_cites = array_unique($search_cites);
+		
+		$query = query(sprintf('SELECT `thread`, `id` FROM ``posts_%s`` WHERE ' .
+			implode(' OR ', $search_cites), $board['uri'])) or error(db_error());
+		
+		$cited_posts = array();
+		while ($cited = $query->fetch(PDO::FETCH_ASSOC)) {
+			$cited_posts[$cited['id']] = $cited['thread'] ? $cited['thread'] : false;
+		}
+				
 		foreach ($cites as $matches) {
 			$cite = $matches[2][0];
-			$query = prepare(sprintf("SELECT `thread`,`id` FROM ``posts_%s`` WHERE `id` = :id LIMIT 1", $board['uri']));
-			$query->bindValue(':id', $cite);
-			$query->execute() or error(db_error($query));
 
 			// preg_match_all is not multibyte-safe
 			foreach ($matches as &$match) {
 				$match[1] = mb_strlen(substr($body_tmp, 0, $match[1]));
 			}
 
-			if ($post = $query->fetch(PDO::FETCH_ASSOC)) {
+			if (isset($cited_posts[$cite])) {
 				$replacement = '<a onclick="highlightReply(\''.$cite.'\');" href="' .
-					$config['root'] . $board['dir'] . $config['dir']['res'] . ($post['thread']?$post['thread']:$post['id']) . '.html#' . $cite . '">' .
-						'&gt;&gt;' . $cite .
-						'</a>';
+					$config['root'] . $board['dir'] . $config['dir']['res'] .
+					($cited_posts[$cite] ? $cited_posts[$cite] : $cite) . '.html#' . $cite . '">' .
+					'&gt;&gt;' . $cite .
+					'</a>';
 
 				$body = mb_substr_replace($body, $matches[1][0] . $replacement . $matches[3][0], $matches[0][1] + $skip_chars, mb_strlen($matches[0][0]));
 				$skip_chars += mb_strlen($matches[1][0] . $replacement . $matches[3][0]) - mb_strlen($matches[0][0]);
 
 				if ($track_cites && $config['track_cites'])
-					$tracked_cites[] = array($board['uri'], $post['id']);
+					$tracked_cites[] = array($board['uri'], $cite);
 			}
 		}
 	}
@@ -1628,6 +1647,66 @@ function markup(&$body, $track_cites = false) {
 
 		$skip_chars = 0;
 		$body_tmp = $body;
+		
+		if (isset($cited_posts)) {
+			// Carry found posts from local board >>X links
+			foreach ($cited_posts as $cite => $thread) {
+				$cited_posts[$cite] = $config['root'] . $board['dir'] . $config['dir']['res'] .
+					($thread ? $thread : $cite) . '.html#' . $cite;
+			}
+			
+			$cited_posts = array(
+				$board['uri'] => $cited_posts
+			);
+		} else
+			$cited_posts = array();
+		
+		$crossboard_indexes = array();
+		$search_cites_boards = array();
+		
+		foreach ($cites as $matches) {
+			$_board = $matches[2][0];
+			$cite = @$matches[3][0];
+			
+			if (!isset($search_cites_boards[$_board]))
+				$search_cites_boards[$_board] = array();
+			$search_cites_boards[$_board][] = $cite;
+		}
+		
+		$tmp_board = $board['uri'];
+		
+		foreach ($search_cites_boards as $_board => $search_cites) {
+			$clauses = array();
+			foreach ($search_cites as $cite) {
+				if (!$cite || isset($cited_posts[$_board][$cite]))
+					continue;
+				$clauses[] = '`id` = ' . $cite;
+			}
+			$clauses = array_unique($clauses);
+			
+			if ($board['uri'] != $_board) {
+				if (!openBoard($_board))
+					continue; // Unknown board
+			}
+			
+			if (!empty($clauses)) {
+				$cited_posts[$_board] = array();
+				
+				$query = query(sprintf('SELECT `thread`, `id` FROM ``posts_%s`` WHERE ' .
+					implode(' OR ', $clauses), $board['uri'])) or error(db_error());
+				
+				while ($cite = $query->fetch(PDO::FETCH_ASSOC)) {
+					$cited_posts[$_board][$cite['id']] = $config['root'] . $board['dir'] . $config['dir']['res'] .
+						($cite['thread'] ? $cite['thread'] : $cite['id']) . '.html#' . $cite['id'];
+				}
+			}
+			
+			$crossboard_indexes[$_board] = $config['root'] . $board['dir'] . $config['file_index'];
+		}
+		
+		// Restore old board
+		if ($board['uri'] != $tmp_board)
+			openBoard($tmp_board);
 
 		foreach ($cites as $matches) {
 			$_board = $matches[2][0];
@@ -1638,42 +1717,34 @@ function markup(&$body, $track_cites = false) {
 				$match[1] = mb_strlen(substr($body_tmp, 0, $match[1]));
 			}
 
-			// Temporarily store board information because it will be overwritten
-			$tmp_board = $board['uri'];
+			if ($cite) {
+				if (isset($cited_posts[$_board][$cite])) {
+					$link = $cited_posts[$_board][$cite];
+					
+					$replacement = '<a ' .
+						($_board == $board['uri'] ?
+							'onclick="highlightReply(\''.$cite.'\');" '
+						: '') . 'href="' . $link . '">' .
+						'&gt;&gt;&gt;/' . $_board . '/' . $cite .
+						'</a>';
 
-			// Check if the board exists, and load settings
-			if (openBoard($_board)) {
-				if ($cite) {
-					$query = prepare(sprintf("SELECT `thread`,`id` FROM ``posts_%s`` WHERE `id` = :id LIMIT 1", $board['uri']));
-					$query->bindValue(':id', $cite);
-					$query->execute() or error(db_error($query));
-
-					if ($post = $query->fetch(PDO::FETCH_ASSOC)) {
-						$replacement = '<a onclick="highlightReply(\''.$cite.'\');" href="' .
-							$config['root'] . $board['dir'] . $config['dir']['res'] . ($post['thread']?$post['thread']:$post['id']) . '.html#' . $cite . '">' .
-								'&gt;&gt;&gt;/' . $_board . '/' . $cite .
-								'</a>';
-
-						$body = mb_substr_replace($body, $matches[1][0] . $replacement . $matches[4][0], $matches[0][1] + $skip_chars, mb_strlen($matches[0][0]));
-						$skip_chars += mb_strlen($matches[1][0] . $replacement . $matches[4][0]) - mb_strlen($matches[0][0]);
-
-						if ($track_cites && $config['track_cites'])
-							$tracked_cites[] = array($board['uri'], $post['id']);
-					}
-				} else {
-					$replacement = '<a href="' .
-						$config['root'] . $board['dir'] . $config['file_index'] . '">' .
-							'&gt;&gt;&gt;/' . $_board . '/' .
-							'</a>';
 					$body = mb_substr_replace($body, $matches[1][0] . $replacement . $matches[4][0], $matches[0][1] + $skip_chars, mb_strlen($matches[0][0]));
 					$skip_chars += mb_strlen($matches[1][0] . $replacement . $matches[4][0]) - mb_strlen($matches[0][0]);
-				}
-			}
 
-			// Restore main board settings
-			openBoard($tmp_board);
+					if ($track_cites && $config['track_cites'])
+						$tracked_cites[] = array($_board, $cite);
+				}
+			} elseif(isset($crossboard_indexes[$_board])) {
+				$replacement = '<a href="' . $crossboard_indexes[$_board] . '">' .
+						'&gt;&gt;&gt;/' . $_board . '/' .
+						'</a>';
+				$body = mb_substr_replace($body, $matches[1][0] . $replacement . $matches[4][0], $matches[0][1] + $skip_chars, mb_strlen($matches[0][0]));
+				$skip_chars += mb_strlen($matches[1][0] . $replacement . $matches[4][0]) - mb_strlen($matches[0][0]);
+			}
 		}
 	}
+	
+	$tracked_cites = array_unique($tracked_cites, SORT_REGULAR);
 
 	$body = preg_replace("/^\s*&gt;.*$/m", '<span class="quote">$0</span>', $body);
 
@@ -1681,12 +1752,33 @@ function markup(&$body, $track_cites = false) {
 		$body = preg_replace('/\s+$/', '', $body);
 
 	$body = preg_replace("/\n/", '<br/>', $body);
-
+	
+	if ($config['markup_repair_tidy']) {
+		$tidy = new tidy();
+		$body = str_replace("\t", '&#09;', $body);
+		$body = $tidy->repairString($body, array(
+			'doctype' => 'omit',
+			'bare' => true,
+			'literal-attributes' => true,
+			'indent' => false,
+			'show-body-only' => true,
+			'wrap' => 0,
+			'output-bom' => false,
+			'output-html' => true,
+			'newline' => 'LF',
+			'quiet' => true,
+		), 'utf8');
+		$body = str_replace("\n", '', $body);
+	}
+	
+	// replace tabs with 8 spaces
+	$body = str_replace("\t", '        ', $body);
+		
 	return $tracked_cites;
 }
 
 function escape_markup_modifiers($string) {
-	return preg_replace('@<tinyboard ([\w\s]+)>@m', '<tinyboard escape $1>', $string);
+	return preg_replace('@<(tinyboard) ([\w\s]+)>@mi', '<$1 escape $2>', $string);
 }
 
 function utf8tohtml($utf8) {
@@ -1759,17 +1851,9 @@ function buildThread($id, $return = false, $mod = false) {
 
 	while ($post = $query->fetch(PDO::FETCH_ASSOC)) {
 		if (!isset($thread)) {
-			$thread = new Thread(
-				$post['id'], $post['subject'], $post['email'], $post['name'], $post['trip'], $post['capcode'], $post['body'], $post['time'],
-				$post['thumb'], $post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'], $post['fileheight'], $post['filesize'],
-				$post['filename'], $post['ip'], $post['sticky'], $post['locked'], $post['sage'], $post['embed'], $mod ? '?/' : $config['root'], $mod
-			);
+			$thread = new Thread($post, $mod ? '?/' : $config['root'], $mod);
 		} else {
-			$thread->add(new Post(
-				$post['id'], $thread->id, $post['subject'], $post['email'], $post['name'], $post['trip'], $post['capcode'], $post['body'],
-				$post['time'], $post['thumb'], $post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'], $post['fileheight'],
-				$post['filesize'], $post['filename'], $post['ip'], $post['embed'], $mod ? '?/' : $config['root'], $mod)
-			);
+			$thread->add(new Post($post, $mod ? '?/' : $config['root'], $mod));
 		}
 	}
 
@@ -1777,7 +1861,8 @@ function buildThread($id, $return = false, $mod = false) {
 	if (!isset($thread))
 		error($config['error']['nonexistant']);
 	
-	$hasnoko50 = $thread->postCount() >= $config['noko50_min'];		
+	$hasnoko50 = $thread->postCount() >= $config['noko50_min'];
+	$antibot = $mod || $return ? false : create_antibot($board['uri'], $id);
 
 	$body = Element('thread.html', array(
 		'board' => $board,
@@ -1788,7 +1873,7 @@ function buildThread($id, $return = false, $mod = false) {
 		'mod' => $mod,
 		'hasnoko50' => $hasnoko50,
 		'isnoko50' => false,
-		'antibot' => $mod || $return ? false : create_antibot($board['uri'], $id),
+		'antibot' => $antibot,
 		'boardlist' => createBoardlist($mod),
 		'return' => ($mod ? '?' . $board['url'] . $config['file_index'] : $config['root'] . $board['dir'] . $config['file_index'])
 	));
@@ -1797,29 +1882,31 @@ function buildThread($id, $return = false, $mod = false) {
 		$build_pages[] = thread_find_page($id);
 
 	// json api
-	$api = new Api();
-	$json = json_encode($api->translateThread($thread));
-	$jsonFilename = $board['dir'] . $config['dir']['res'] . $id . ".json";
-	file_write($jsonFilename, $json);
+	if ($config['api']['enabled']) {
+		$api = new Api();
+		$json = json_encode($api->translateThread($thread));
+		$jsonFilename = $board['dir'] . $config['dir']['res'] . $id . '.json';
+		file_write($jsonFilename, $json);
+	}
 
 	if ($return) {
 		return $body;
 	} else {
 		$noko50fn = $board['dir'] . $config['dir']['res'] . sprintf($config['file_page50'], $id);
 		if ($hasnoko50 || file_exists($noko50fn)) {
-			buildThread50($id, $return, $mod, $thread);
+			buildThread50($id, $return, $mod, $thread, $antibot);
 		}
 
 		file_write($board['dir'] . $config['dir']['res'] . sprintf($config['file_page'], $id), $body);
 	}
 }
 
-function buildThread50($id, $return = false, $mod = false, $thread = null) {
+function buildThread50($id, $return = false, $mod = false, $thread = null, $antibot = false) {
 	global $board, $config, $build_pages;
 	$id = round($id);
 	
-	if (event('build-thread', $id))
-		return;
+	if ($antibot)
+		$antibot->reset();
 		
 	if (!$thread) {
 		$query = prepare(sprintf("SELECT * FROM ``posts_%s`` WHERE (`thread` IS NULL AND `id` = :id) OR `thread` = :id ORDER BY `thread`,`id` DESC LIMIT :limit", $board['uri']));
@@ -1830,20 +1917,12 @@ function buildThread50($id, $return = false, $mod = false, $thread = null) {
 		$num_images = 0;
 		while ($post = $query->fetch(PDO::FETCH_ASSOC)) {
 			if (!isset($thread)) {
-				$thread = new Thread(
-					$post['id'], $post['subject'], $post['email'], $post['name'], $post['trip'], $post['capcode'], $post['body'], $post['time'],
-					$post['thumb'], $post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'], $post['fileheight'], $post['filesize'],
-					$post['filename'], $post['ip'], $post['sticky'], $post['locked'], $post['sage'], $post['embed'], $mod ? '?/' : $config['root'], $mod
-				);
+				$thread = new Thread($post, $mod ? '?/' : $config['root'], $mod);
 			} else {
 				if ($post['file'])
 					$num_images++;
 					
-				$thread->add(new Post(
-					$post['id'], $thread->id, $post['subject'], $post['email'], $post['name'], $post['trip'], $post['capcode'], $post['body'],
-					$post['time'], $post['thumb'], $post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'], $post['fileheight'],
-					$post['filesize'], $post['filename'], $post['ip'], $post['embed'], $mod ? '?/' : $config['root'], $mod)
-				);
+				$thread->add(new Post($post, $mod ? '?/' : $config['root'], $mod));
 			}
 		}
 
@@ -1889,7 +1968,7 @@ function buildThread50($id, $return = false, $mod = false, $thread = null) {
 		'mod' => $mod,
 		'hasnoko50' => $hasnoko50,
 		'isnoko50' => true,
-		'antibot' => $mod ? false : create_antibot($board['uri'], $id),
+		'antibot' => $mod ? false : ($antibot ? $antibot : create_antibot($board['uri'], $id)),
 		'boardlist' => createBoardlist($mod),
 		'return' => ($mod ? '?' . $board['url'] . $config['file_index'] : $config['root'] . $board['dir'] . $config['file_index'])
 	));	
@@ -1901,7 +1980,7 @@ function buildThread50($id, $return = false, $mod = false, $thread = null) {
 	}
 }
 
- function rrmdir($dir) {
+function rrmdir($dir) {
 	if (is_dir($dir)) {
 		$objects = scandir($dir);
 		foreach ($objects as $object) {
@@ -2023,10 +2102,10 @@ function undoImage(array $post) {
 	if (!$post['has_file'])
 		return;
 
-	if (isset($post['file']))
-		file_unlink($post['file']);
-	if (isset($post['thumb']))
-		file_unlink($post['thumb']);
+	if (isset($post['file_path']))
+		file_unlink($post['file_path']);
+	if (isset($post['thumb_path']))
+		file_unlink($post['thumb_path']);
 }
 
 function rDNS($ip_addr) {
@@ -2047,7 +2126,7 @@ function rDNS($ip_addr) {
 	}
 
 	if ($config['cache']['enabled'])
-		cache::set('rdns_' . $ip_addr, $host, 3600);
+		cache::set('rdns_' . $ip_addr, $host);
 
 	return $host;
 }
@@ -2056,7 +2135,7 @@ function DNS($host) {
 	global $config;
 
 	if ($config['cache']['enabled'] && ($ip_addr = cache::get('dns_' . $host))) {
-		return $ip_addr;
+		return $ip_addr != '?' ? $ip_addr : false;
 	}
 
 	if (!$config['dns_system']) {
@@ -2072,7 +2151,7 @@ function DNS($host) {
 	}
 
 	if ($config['cache']['enabled'])
-		cache::set('dns_' . $host, $ip_addr, 3600);
+		cache::set('dns_' . $host, $ip_addr !== false ? $ip_addr : '?');
 
 	return $ip_addr;
 }
@@ -2088,12 +2167,13 @@ function shell_exec_error($command, $suppress_stdout = false) {
 	$return = preg_replace('/TB_SUCCESS$/', '', $return);
 
 	if ($config['debug']) {
-		$time = round((microtime(true) - $start) * 1000, 2) . 'ms';
+		$time = microtime(true) - $start;
 		$debug['exec'][] = array(
 			'command' => $command,
-			'time' => '~' . $time,
+			'time' => '~' . round($time * 1000, 2) . 'ms',
 			'response' => $return ? $return : null
 		);
+		$debug['time']['exec'] += $time;
 	}
 
 	return $return === 'TB_SUCCESS' ? false : $return;

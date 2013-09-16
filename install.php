@@ -1,7 +1,7 @@
 <?php
 
 // Installation/upgrade file	
-define('VERSION', 'v0.9.6-dev-11 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.9-gold</a>');
+define('VERSION', 'v0.9.6-dev-16 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.13</a>');
 
 require 'inc/functions.php';
 
@@ -22,6 +22,15 @@ if (file_exists($config['has_installed'])) {
 	$version = trim(file_get_contents($config['has_installed']));
 	if (empty($version))
 		$version = 'v0.9.1';
+	
+	function __query($sql) {
+		sql_open();
+		
+		if (mysql_version() >= 50503)
+			return query($sql);
+		else
+			return query(str_replace('utf8mb4', 'utf8', $sql));
+	}
 	
 	$boards = listBoards();
 	
@@ -256,14 +265,6 @@ if (file_exists($config['has_installed'])) {
 		case 'v0.9.6-dev-9 + <a href="https://github.com/vichan-devel/Tinyboard/">vichan-devel-4.0.3</a>':
 		case 'v0.9.6-dev-9 + <a href="https://github.com/vichan-devel/Tinyboard/">vichan-devel-4.0.4-gold</a>':
 		case 'v0.9.6-dev-9 + <a href="https://github.com/vichan-devel/Tinyboard/">vichan-devel-4.0.5-gold</a>':
-			sql_open();
-			function __query($sql) {
-				if (mysql_version() >= 50503)
-					return query($sql);
-				else
-					return query(str_replace('utf8mb4', 'utf8', $sql));
-			}
-			
 			foreach ($boards as &$board) {
 				__query(sprintf("ALTER TABLE `posts_%s`
 					CHANGE `subject` `subject` VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL,
@@ -367,6 +368,39 @@ if (file_exists($config['has_installed'])) {
 		case 'v0.9.6-dev-11 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.6</a>':
 		case 'v0.9.6-dev-11 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.7-gold</a>':
 		case 'v0.9.6-dev-11 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.8-gold</a>':
+		case 'v0.9.6-dev-11 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.9-gold</a>':
+			foreach ($boards as &$board) {
+				__query(sprintf("ALTER TABLE  ``posts_%s``
+					CHANGE  `thumb`  `thumb` VARCHAR( 255 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL,
+					CHANGE  `file`  `file` VARCHAR( 255 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL ;",
+					$board['uri'])) or error(db_error());
+			}
+		case 'v0.9.6-dev-12':
+		case 'v0.9.6-dev-12 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.10</a>':
+		case 'v0.9.6-dev-12 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.11-gold</a>':
+			foreach ($boards as &$board) {
+				query(sprintf("ALTER TABLE  ``posts_%s`` ADD INDEX `ip` (`ip`)", $board['uri'])) or error(db_error());
+			}
+		case 'v0.9.6-dev-13':
+			query("ALTER TABLE ``antispam`` ADD INDEX `expires` (`expires`)") or error(db_error());
+		case 'v0.9.6-dev-14':
+		case 'v0.9.6-dev-14 + <a href="https://int.vichan.net/devel/">vichan-devel-4.0.12</a>':
+			foreach ($boards as &$board) {
+				query(sprintf("ALTER TABLE  ``posts_%s``
+					DROP INDEX `body`,
+					ADD INDEX `filehash` (`filehash`(40))", $board['uri'])) or error(db_error());
+			}
+			query("ALTER TABLE ``modlogs`` ADD INDEX `mod` (`mod`)") or error(db_error());
+			query("ALTER TABLE ``bans`` DROP INDEX `ip`") or error(db_error());
+			query("ALTER TABLE ``bans`` ADD INDEX `ip` (`ip`)") or error(db_error());
+			query("ALTER TABLE ``noticeboard`` ADD INDEX `time` (`time`)") or error(db_error());
+			query("ALTER TABLE ``pms`` ADD INDEX `to` (`to`, `unread`)") or error(db_error());
+		case 'v0.9.6-dev-15':
+			foreach ($boards as &$board) {
+				query(sprintf("ALTER TABLE  ``posts_%s``
+					ADD INDEX `list_threads` (`thread`, `sticky`, `bump`)", $board['uri'])) or error(db_error());
+			}
+		case 'v0.9.6-dev-16':
 		case false:
 			// Update version number
 			file_write($config['has_installed'], VERSION);
@@ -517,6 +551,13 @@ if ($step == 0) {
 		),
 		array(
 			'category' => 'Image processing',
+			'name' => '`gm` (command-line GraphicsMagick)',
+			'result' => $can_exec && shell_exec('which gm'),
+			'required' => false,
+			'message' => '(Optional) `gm` was not found or executable; command-line GraphicsMagick (faster than ImageMagick) cannot be enabled.',
+		),
+		array(
+			'category' => 'Image processing',
 			'name' => '`gifsicle` (command-line animted GIF thumbnailing)',
 			'result' => $can_exec && shell_exec('which gifsicle'),
 			'required' => false,
@@ -531,15 +572,30 @@ if ($step == 0) {
 		),
 		array(
 			'category' => 'File permissions',
+			'name' => getcwd() . '/templates/cache',
+			'result' => is_writable('templates') && (!is_dir('templates/cache') || is_writable('templates/cache')),
+			'required' => true,
+			'message' => 'You must give Tinyboard permission to create (and write to) the <code>templates/cache</code> directory or performance will be drastically reduced.'
+		),
+		array(
+			'category' => 'File permissions',
 			'name' => getcwd() . '/inc/instance-config.php',
 			'result' => is_writable('inc/instance-config.php'),
 			'required' => false,
-			'message' => 'Tinyboard does not have permission to make changes to inc/instance-config.php. To complete the installation, you will be asked to manually copy and paste code into the file instead.'
+			'message' => 'Tinyboard does not have permission to make changes to <code>inc/instance-config.php</code>. To complete the installation, you will be asked to manually copy and paste code into the file instead.'
+		),
+		array(
+			'category' => 'Misc',
+			'name' => 'Caching available (APC, XCache, Memcached or Redis)',
+			'result' => extension_loaded('apc') || extension_loaded('xcache')
+				|| extension_loaded('memcached') || extension_loaded('redis'),
+			'required' => false,
+			'message' => 'You will not be able to enable the additional caching system, designed to minimize SQL queries and significantly improve performance. <a href="http://php.net/manual/en/book.apc.php">APC</a> is the recommended method of caching, but <a href="http://xcache.lighttpd.net/">XCache</a>, <a href="http://www.php.net/manual/en/intro.memcached.php">Memcached</a> and <a href="http://pecl.php.net/package/redis">Redis</a> are also supported.'
 		),
 		array(
 			'category' => 'Misc',
 			'name' => 'Tinyboard installed using git',
-			'result' => is_dir('.git.'),
+			'result' => is_dir('.git'),
 			'required' => false,
 			'message' => 'Tinyboard is still beta software and it\'s not going to come out of beta any time soon. As there are often many months between releases yet changes and bug fixes are very frequent, it\'s recommended to use the git repository to maintain your Tinyboard installation. Using git makes upgrading much easier.'
 		)
@@ -648,18 +704,18 @@ if ($step == 0) {
 			$sql_errors .= '<li>' . db_error() . '</li>';
 	}
 	
-	$boards = listBoards();
-	foreach ($boards as &$_board) {
-		setupBoard($_board);
-		buildIndex();
-	}
-	
 	$page['title'] = 'Installation complete';
 	$page['body'] = '<p style="text-align:center">Thank you for using Tinyboard. Please remember to report any bugs you discover. <a href="http://tinyboard.org/docs/?p=Config">How do I edit the config files?</a></p>';
 	
 	if (!empty($sql_errors)) {
 		$page['body'] .= '<div class="ban"><h2>SQL errors</h2><p>SQL errors were encountered when trying to install the database. This may be the result of using a database which is already occupied with a Tinyboard installation; if so, you can probably ignore this.</p><p>The errors encountered were:</p><ul>' . $sql_errors . '</ul><p><a href="?step=5">Ignore errors and complete installation.</a></p></div>';
 	} else {
+		$boards = listBoards();
+		foreach ($boards as &$_board) {
+			setupBoard($_board);
+			buildIndex();
+		}
+		
 		file_write($config['has_installed'], VERSION);
 		if (!file_unlink(__FILE__)) {
 			$page['body'] .= '<div class="ban"><h2>Delete install.php!</h2><p>I couldn\'t remove <strong>install.php</strong>. You will have to remove it manually.</p></div>';
@@ -670,6 +726,12 @@ if ($step == 0) {
 } elseif ($step == 5) {
 	$page['title'] = 'Installation complete';
 	$page['body'] = '<p style="text-align:center">Thank you for using Tinyboard. Please remember to report any bugs you discover.</p>';
+	
+	$boards = listBoards();
+	foreach ($boards as &$_board) {
+		setupBoard($_board);
+		buildIndex();
+	}
 	
 	file_write($config['has_installed'], VERSION);
 	if (!file_unlink(__FILE__)) {
