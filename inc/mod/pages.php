@@ -92,7 +92,7 @@ function mod_dashboard() {
 		}
 	}
 	
-	if (!$config['cache']['enabled'] || ($args['unread_pms'] = cache::get('pm_unreadcount_' . $mod['id'])) == false) {
+	if (!$config['cache']['enabled'] || ($args['unread_pms'] = cache::get('pm_unreadcount_' . $mod['id'])) === false) {
 		$query = prepare('SELECT COUNT(*) FROM ``pms`` WHERE `to` = :id AND `unread` = 1');
 		$query->bindValue(':id', $mod['id']);
 		$query->execute() or error(db_error($query));
@@ -359,10 +359,12 @@ function mod_edit_board($boardName) {
 			$query->bindValue(':uri', $board['uri']);
 			$query->execute() or error(db_error($query));
 			
-			modLog('Deleted board: ' . sprintf($config['board_abbreviation'], $board['uri']), false);
+			if ($config['cache']['enabled']) {
+				cache::delete('board_' . $board['uri']);
+				cache::delete('all_boards');
+			}
 			
-			// Delete entire board directory
-			rrmdir($board['uri'] . '/');
+			modLog('Deleted board: ' . sprintf($config['board_abbreviation'], $board['uri']), false);
 			
 			// Delete posting table
 			$query = query(sprintf('DROP TABLE IF EXISTS ``posts_%s``', $board['uri'])) or error(db_error());
@@ -377,7 +379,7 @@ function mod_edit_board($boardName) {
 			$query->bindValue(':uri', $board['uri'], PDO::PARAM_INT);
 			$query->execute() or error(db_error($query));
 			
-			$query = prepare("SELECT `board`, `post` FROM ``cites`` WHERE `target_board` = :board");
+			$query = prepare("SELECT `board`, `post` FROM ``cites`` WHERE `target_board` = :board ORDER BY `board`");
 			$query->bindValue(':board', $board['uri']);
 			$query->execute() or error(db_error($query));
 			while ($cite = $query->fetch(PDO::FETCH_ASSOC)) {
@@ -388,6 +390,9 @@ function mod_edit_board($boardName) {
 					rebuildPost($cite['post']);
 				}
 			}
+			
+			if (isset($tmp_board))
+				$board = $tmp_board;
 			
 			$query = prepare('DELETE FROM ``cites`` WHERE `board` = :board OR `target_board` = :board');
 			$query->bindValue(':board', $board['uri']);
@@ -409,6 +414,9 @@ function mod_edit_board($boardName) {
 					$_query->execute() or error(db_error($_query));
 				}
 			}
+			
+			// Delete entire board directory
+			rrmdir($board['uri'] . '/');
 		} else {
 			$query = prepare('UPDATE ``boards`` SET `title` = :title, `subtitle` = :subtitle WHERE `uri` = :uri');
 			$query->bindValue(':uri', $board['uri']);
@@ -790,19 +798,9 @@ function mod_page_ip($ip) {
 		
 		while ($post = $query->fetch(PDO::FETCH_ASSOC)) {
 			if (!$post['thread']) {
-				// TODO: There is no reason why this should be such a fucking mess.
-				$po = new Thread(
-					$post['id'], $post['subject'], $post['email'], $post['name'], $post['trip'], $post['capcode'], $post['body'],
-					$post['time'], $post['thumb'], $post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'],
-					$post['fileheight'], $post['filesize'], $post['filename'], $post['ip'], $post['sticky'], $post['locked'],
-					$post['sage'], $post['embed'], '?/', $mod, false
-				);
+				$po = new Thread($post, '?/', $mod, false);
 			} else {
-				$po = new Post(
-					$post['id'], $post['thread'], $post['subject'], $post['email'], $post['name'], $post['trip'], $post['capcode'],
-					$post['body'], $post['time'], $post['thumb'], $post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'],
-					$post['fileheight'], $post['filesize'], $post['filename'], $post['ip'],  $post['embed'], '?/', $mod
-				);
+				$po = new Post($post, '?/', $mod);
 			}
 			
 			if (!isset($args['posts'][$board['uri']]))
@@ -1069,10 +1067,13 @@ function mod_move_reply($originBoard, $postID) {
 			}
 		}
 
+		// build index
 		buildIndex();
+		// build new thread
+		buildThread($newID);
 		
 		// trigger themes
-		rebuildThemes($post['op'] ? 'post-thread' : 'post');
+		rebuildThemes('post', $targetBoard);
 		// mod log
 		modLog("Moved post #${postID} to " . sprintf($config['board_abbreviation'], $targetBoard) . " (#${newID})", $originBoard);
 		
@@ -1108,7 +1109,7 @@ function mod_move_reply($originBoard, $postID) {
 }
 
 function mod_move($originBoard, $postID) {
-	global $board, $config, $mod;
+	global $board, $config, $mod, $pdo;
 	
 	if (!openBoard($originBoard))
 		error($config['error']['noboard']);
@@ -1158,7 +1159,7 @@ function mod_move($originBoard, $postID) {
 		if ($post['has_file']) {
 			// copy image
 			$clone($file_src, sprintf($config['board_path'], $board['uri']) . $config['dir']['img'] . $post['file']);
-			if (!in_array($post['thumb'], array('spoiler', 'deleted')))
+			if (!in_array($post['thumb'], array('spoiler', 'deleted', 'file')))
 				$clone($file_thumb, sprintf($config['board_path'], $board['uri']) . $config['dir']['thumb'] . $post['thumb']);
 		}
 		
@@ -1225,13 +1226,14 @@ function mod_move($originBoard, $postID) {
 				$clone($post['file_thumb'], sprintf($config['board_path'], $board['uri']) . $config['dir']['thumb'] . $post['thumb']);
 			}
 			
-			foreach ($post['tracked_cites'] as $cite) {
-				$query = prepare('INSERT INTO ``cites`` VALUES (:board, :post, :target_board, :target)');
-				$query->bindValue(':board', $board['uri']);
-				$query->bindValue(':post', $newPostID, PDO::PARAM_INT);
-				$query->bindValue(':target_board',$cite[0]);
-				$query->bindValue(':target', $cite[1], PDO::PARAM_INT);
-				$query->execute() or error(db_error($query));
+			if (!empty($post['tracked_cites'])) {
+				$insert_rows = array();
+				foreach ($post['tracked_cites'] as $cite) {
+					$insert_rows[] = '(' .
+						$pdo->quote($board['uri']) . ', ' . $newPostID . ', ' .
+						$pdo->quote($cite[0]) . ', ' . (int)$cite[1] . ')';
+				}
+				query('INSERT INTO ``cites`` VALUES ' . implode(', ', $insert_rows)) or error(db_error());
 			}
 		}
 		
@@ -1244,7 +1246,7 @@ function mod_move($originBoard, $postID) {
 		buildIndex();
 		
 		// trigger themes
-		rebuildThemes('post');
+		rebuildThemes('post', $targetBoard);
 		
 		// return to original board
 		openBoard($originBoard);
@@ -1348,6 +1350,8 @@ function mod_ban_post($board, $delete, $post, $token = false) {
 			modLog("Deleted post #{$post}");
 			// Rebuild board
 			buildIndex();
+			// Rebuild themes
+			rebuildThemes('post-delete', $board);
 		}
 		
 		header('Location: ?/' . sprintf($config['board_path'], $board) . $config['file_index'], true, $config['redirect_http']);
@@ -1398,7 +1402,7 @@ function mod_edit_post($board, $edit_raw_html, $postID) {
 		$query->bindValue(':subject', $_POST['subject']);
 		$query->bindValue(':body', $_POST['body']);
 		if ($edit_raw_html) {
-			$body_nomarkup = '<tinyboard raw html>' . $_POST['body'] . '</tinyboard>';
+			$body_nomarkup = $_POST['body'] . "\n<tinyboard raw html>1</tinyboard>";
 			$query->bindValue(':body_nomarkup', $body_nomarkup);
 		}
 		$query->execute() or error(db_error($query));
@@ -1411,6 +1415,8 @@ function mod_edit_post($board, $edit_raw_html, $postID) {
 		}
 		
 		buildIndex();
+
+		rebuildThemes('post', $board);
 		
 		header('Location: ?/' . sprintf($config['board_path'], $board) . $config['dir']['res'] . sprintf($config['file_page'], $post['thread'] ? $post['thread'] : $postID) . '#' . $postID, true, $config['redirect_http']);
 	} else {
@@ -1419,6 +1425,8 @@ function mod_edit_post($board, $edit_raw_html, $postID) {
 			$post['body'] = str_replace("\n", '&#010;', utf8tohtml($post['body']));
 			$post['body_nomarkup'] = str_replace("\r", '', $post['body_nomarkup']);
 			$post['body'] = str_replace("\r", '', $post['body']);
+			$post['body_nomarkup'] = str_replace("\t", '&#09;', $post['body_nomarkup']);
+			$post['body'] = str_replace("\t", '&#09;', $post['body']);
 		}
 				
 		mod_page(_('Edit post'), 'mod/edit_post_form.html', array('token' => $security_token, 'board' => $board, 'raw' => $edit_raw_html, 'post' => $post));
@@ -1440,7 +1448,8 @@ function mod_delete($board, $post) {
 	modLog("Deleted post #{$post}");
 	// Rebuild board
 	buildIndex();
-	
+	// Rebuild themes
+	rebuildThemes('post-delete', $board);
 	// Redirect
 	header('Location: ?/' . sprintf($config['board_path'], $board) . $config['file_index'], true, $config['redirect_http']);
 }
@@ -1461,6 +1470,8 @@ function mod_deletefile($board, $post) {
 	
 	// Rebuild board
 	buildIndex();
+	// Rebuild themes
+	rebuildThemes('post-delete', $board);
 	
 	// Redirect
 	header('Location: ?/' . sprintf($config['board_path'], $board) . $config['file_index'], true, $config['redirect_http']);
@@ -1499,6 +1510,9 @@ function mod_spoiler_image($board, $post) {
 
 	// Rebuild board
 	buildIndex();
+
+	// Rebuild themes
+	rebuildThemes('post-delete', $board);
        
 	// Redirect
 	header('Location: ?/' . sprintf($config['board_path'], $board) . $config['file_index'], true, $config['redirect_http']);
@@ -1540,7 +1554,7 @@ function mod_deletebyip($boardName, $post, $global = false) {
 	if ($query->rowCount() < 1)
 		error($config['error']['invalidpost']);
 	
-	set_time_limit($config['mod']['rebuild_timelimit']);
+	@set_time_limit($config['mod']['rebuild_timelimit']);
 	
 	$threads_to_rebuild = array();
 	$threads_deleted = array();
@@ -1548,6 +1562,8 @@ function mod_deletebyip($boardName, $post, $global = false) {
 		openBoard($post['board']);
 		
 		deletePost($post['id'], false, false);
+
+		rebuildThemes('post-delete', $board['uri']);
 
 		if ($post['thread'])
 			$threads_to_rebuild[$post['board']][$post['thread']] = true;
@@ -1905,7 +1921,7 @@ function mod_rebuild() {
 		error($config['error']['noaccess']);
 	
 	if (isset($_POST['rebuild'])) {
-		set_time_limit($config['mod']['rebuild_timelimit']);
+		@set_time_limit($config['mod']['rebuild_timelimit']);
 		
 		$log = array();
 		$boards = listBoards();
@@ -2012,19 +2028,9 @@ function mod_reports() {
 		
 		if (!$post['thread']) {
 			// Still need to fix this:
-			$po = new Thread(
-				$post['id'], $post['subject'], $post['email'], $post['name'], $post['trip'],
-				$post['capcode'], $post['body'], $post['time'], $post['thumb'],
-				$post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'],
-				$post['fileheight'], $post['filesize'], $post['filename'], $post['ip'], $post['sticky'],
-				$post['locked'], $post['sage'], $post['embed'], '?/', $mod, false
-			);
+			$po = new Thread($post, '?/', $mod, false);
 		} else {
-			$po = new Post(
-				$post['id'], $post['thread'], $post['subject'], $post['email'], $post['name'], $post['trip'], $post['capcode'],
-				$post['body'], $post['time'], $post['thumb'], $post['thumbwidth'], $post['thumbheight'], $post['file'], $post['filewidth'],
-				$post['fileheight'], $post['filesize'], $post['filename'], $post['ip'], $post['embed'], '?/', $mod
-			);
+			$po = new Post($post, '?/', $mod);
 		}
 		
 		// a little messy and inefficient
@@ -2280,7 +2286,10 @@ function mod_theme_configure($theme_name) {
 			$query = prepare("INSERT INTO ``theme_settings`` VALUES(:theme, :name, :value)");
 			$query->bindValue(':theme', $theme_name);
 			$query->bindValue(':name', $conf['name']);
-			$query->bindValue(':value', $_POST[$conf['name']]);
+			if ($conf['type'] == 'checkbox')
+				$query->bindValue(':value', isset($_POST[$conf['name']]) ? 1 : 0);
+			else
+				$query->bindValue(':value', $_POST[$conf['name']]);
 			$query->execute() or error(db_error($query));
 		}
 		

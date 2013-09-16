@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS `antispam` (
   `expires` int(11) DEFAULT NULL,
   `passed` smallint(6) NOT NULL,
   PRIMARY KEY (`hash`),
-  KEY `board` (`board`,`thread`)
+  KEY `board` (`board`,`thread`),
+  KEY `expires` (`expires`)
 ) ENGINE=MyISAM DEFAULT CHARSET=ascii COLLATE=ascii_bin;
 
 -- --------------------------------------------------------
@@ -48,7 +49,7 @@ CREATE TABLE IF NOT EXISTS `bans` (
   `board` varchar(58) CHARACTER SET utf8 DEFAULT NULL,
   `seen` tinyint(1) NOT NULL,
   PRIMARY KEY (`id`),
-  FULLTEXT KEY `ip` (`ip`)
+  KEY `ip` (`ip`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 AUTO_INCREMENT=1 ;
 
 -- --------------------------------------------------------
@@ -114,7 +115,8 @@ CREATE TABLE IF NOT EXISTS `modlogs` (
   `board` varchar(58) CHARACTER SET utf8 DEFAULT NULL,
   `time` int(11) NOT NULL,
   `text` text NOT NULL,
-  KEY `time` (`time`)
+  KEY `time` (`time`),
+  KEY `mod`(`mod`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
@@ -181,7 +183,8 @@ CREATE TABLE IF NOT EXISTS `noticeboard` (
   `time` int(11) NOT NULL,
   `subject` text NOT NULL,
   `body` text NOT NULL,
-  UNIQUE KEY `id` (`id`)
+  UNIQUE KEY `id` (`id`),
+  KEY `time` (`time`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 AUTO_INCREMENT=1 ;
 
 -- --------------------------------------------------------
@@ -197,7 +200,8 @@ CREATE TABLE IF NOT EXISTS `pms` (
   `message` text NOT NULL,
   `time` int(11) NOT NULL,
   `unread` tinyint(1) NOT NULL,
-  PRIMARY KEY (`id`)
+  PRIMARY KEY (`id`),
+  KEY `to` (`to`, `unread`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 AUTO_INCREMENT=1 ;
 
 -- --------------------------------------------------------

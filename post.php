@@ -75,6 +75,9 @@ if (isset($_POST['delete'])) {
 	}
 	
 	buildIndex();
+
+
+	rebuildThemes('post-delete', $board['uri']);
 	
 	$is_mod = isset($_POST['mod']) && $_POST['mod'];
 	$root = $is_mod ? $config['root'] . $config['file_mod'] . '?/' : $config['root'];
@@ -275,14 +278,19 @@ if (isset($_POST['delete'])) {
 		if (!preg_match($config['url_regex'], $post['file_url']))
 			error($config['error']['invalidimg']);
 		
-		
-		$post['extension'] = strtolower(mb_substr($post['file_url'], mb_strrpos($post['file_url'], '.') + 1));
+		if (mb_strpos($post['file_url'], '?') !== false)
+			$url_without_params = mb_substr($post['file_url'], 0, mb_strpos($post['file_url'], '?'));
+		else
+			$url_without_params = $post['file_url'];
+
+		$post['extension'] = strtolower(mb_substr($url_without_params, mb_strrpos($url_without_params, '.') + 1));
 		if (!in_array($post['extension'], $config['allowed_ext']) && !in_array($post['extension'], $config['allowed_ext_files']))
 			error($config['error']['unknownext']);
 
 		$post['file_tmp'] = tempnam($config['tmp'], 'url');
 		function unlink_tmp_file($file) {
 			@unlink($file);
+			fatal_error_handler();
 		}
 		register_shutdown_function('unlink_tmp_file', $post['file_tmp']);
 		
@@ -293,7 +301,7 @@ if (isset($_POST['delete'])) {
 		curl_setopt($curl, CURLOPT_FAILONERROR, true);
 		curl_setopt($curl, CURLOPT_FOLLOWLOCATION, false);
 		curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 5);
-		curl_setopt($curl, CURLOPT_TIMEOUT, 15);
+		curl_setopt($curl, CURLOPT_TIMEOUT, $config['upload_by_url_timeout']);
 		curl_setopt($curl, CURLOPT_USERAGENT, 'Tinyboard');
 		curl_setopt($curl, CURLOPT_BINARYTRANSFER, true);
 		curl_setopt($curl, CURLOPT_FILE, $fp);
@@ -307,7 +315,7 @@ if (isset($_POST['delete'])) {
 		fclose($fp);
 
 		$_FILES['file'] = array(
-			'name' => basename($post['file_url']),
+			'name' => basename($url_without_params),
 			'tmp_name' => $post['file_tmp'],
 			'error' => 0,
 			'size' => filesize($post['file_tmp'])
@@ -421,10 +429,27 @@ if (isset($_POST['delete'])) {
 		error(sprintf($config['error']['toolong'], 'password'));
 		
 	wordfilters($post['body']);
+	
+	// Check for a flood
+	if (!hasPermission($config['mod']['flood'], $board['uri']) && checkFlood($post)) {
+		error($config['error']['flood']);
+	}
+	
 	$post['body'] = escape_markup_modifiers($post['body']);
 	
 	if ($mod && isset($post['raw']) && $post['raw']) {
-		$post['body'] = '<tinyboard raw html>' . $post['body'] . '</tinyboard>';
+		$post['body'] .= "\n<tinyboard raw html>1</tinyboard>";
+	}
+	
+	if ($config['country_flags']) {
+		if (!geoip_db_avail(GEOIP_COUNTRY_EDITION)) {
+			error('GeoIP not available: ' . geoip_db_filename(GEOIP_COUNTRY_EDITION));
+		}
+		if ($country_code = @geoip_country_code_by_name($_SERVER['REMOTE_ADDR'])) {
+			if (!in_array(strtolower($country_code), array('eu', 'ap', 'o1', 'a1', 'a2')))
+				$post['body'] .= "\n<tinyboard flag>" . strtolower($country_code) . "</tinyboard>" .
+					"\n<tinyboard flag alt>" . @geoip_country_name_by_name($_SERVER['REMOTE_ADDR']) . "</tinyboard>";
+		}
 	}
 	
 	if (mysql_version() >= 50503) {
@@ -445,11 +470,6 @@ if (isset($_POST['delete'])) {
 	}
 	
 	$post['tracked_cites'] = markup($post['body'], true);
-	
-	// Check for a flood
-	if (!hasPermission($config['mod']['flood'], $board['uri']) && checkFlood($post)) {
-		error($config['error']['flood']);
-	}
 	
 	require_once 'inc/filters.php';
 	
@@ -509,7 +529,8 @@ if (isset($_POST['delete'])) {
 									escapeshellarg($upload));
 								if ($config['use_exiftool'] && !$config['strip_exif']) {
 									if ($exiftool_error = shell_exec_error(
-										'exiftool -q -orientation=1 -n ' . escapeshellarg($upload)))
+										'exiftool -overwrite_original -q -q -orientation=1 -n ' .
+											escapeshellarg($upload)))
 										error('exiftool failed!', null, $exiftool_error);
 								} else {
 									// TODO: Find another way to remove the Orientation tag from the EXIF profile
@@ -572,7 +593,8 @@ if (isset($_POST['delete'])) {
 			
 			if ($config['redraw_image'] || (!@$post['exif_stripped'] && $config['strip_exif'] && ($post['extension'] == 'jpg' || $post['extension'] == 'jpeg'))) {
 				if (!$config['redraw_image'] && $config['use_exiftool']) {
-					if($error = shell_exec_error('exiftool -ignoreMinorErrors -q -q -all= ' . escapeshellarg($upload)))
+					if($error = shell_exec_error('exiftool -overwrite_original -ignoreMinorErrors -q -q -all= ' .
+						escapeshellarg($upload)))
 						error('Could not strip EXIF metadata!', null, $error);
 				} else {
 					$image->to($post['file']);
@@ -584,8 +606,10 @@ if (isset($_POST['delete'])) {
 			// not an image
 			//copy($config['file_thumb'], $post['thumb']);
 			$post['thumb'] = 'file';
-			
-			$size = @getimagesize($config['file_thumb']);
+
+			$size = @getimagesize(sprintf($config['file_thumb'],
+				isset($config['file_icons'][$post['extension']]) ?
+					$config['file_icons'][$post['extension']] : $config['file_icons']['default']));
 			$post['thumbwidth'] = $size[0];
 			$post['thumbheight'] = $size[1];
 		}
@@ -594,7 +618,7 @@ if (isset($_POST['delete'])) {
 			if (isset($post['file_tmp'])) {
 				if (!@rename($upload, $post['file']))
 					error($config['error']['nomove']);
-				chmod($post['file'], 0755);
+				chmod($post['file'], 0644);
 			} elseif (!@move_uploaded_file($upload, $post['file']))
 				error($config['error']['nomove']);
 		}
@@ -642,6 +666,7 @@ if (isset($_POST['delete'])) {
 	// Remove board directories before inserting them into the database.
 	if ($post['has_file']) {
 		$post['file_path'] = $post['file'];
+		$post['thumb_path'] = $post['thumb'];
 		$post['file'] = mb_substr($post['file'], mb_strlen($board['dir'] . $config['dir']['img']));
 		if ($is_an_image && $post['thumb'] != 'spoiler')
 			$post['thumb'] = mb_substr($post['thumb'], mb_strlen($board['dir'] . $config['dir']['thumb']));
@@ -660,15 +685,14 @@ if (isset($_POST['delete'])) {
 		incrementSpamHash($post['antispam_hash']);
 	}
 	
-	if (isset($post['tracked_cites'])) {
+	if (isset($post['tracked_cites']) && !empty($post['tracked_cites'])) {
+		$insert_rows = array();
 		foreach ($post['tracked_cites'] as $cite) {
-			$query = prepare('INSERT INTO ``cites`` VALUES (:board, :post, :target_board, :target)');
-			$query->bindValue(':board', $board['uri']);
-			$query->bindValue(':post', $id, PDO::PARAM_INT);
-			$query->bindValue(':target_board',$cite[0]);
-			$query->bindValue(':target', $cite[1], PDO::PARAM_INT);
-			$query->execute() or error(db_error($query));
+			$insert_rows[] = '(' .
+				$pdo->quote($board['uri']) . ', ' . (int)$id . ', ' .
+				$pdo->quote($cite[0]) . ', ' . (int)$cite[1] . ')';
 		}
+		query('INSERT INTO ``cites`` VALUES ' . implode(', ', $insert_rows)) or error(db_error());
 	}
 	
 	if (!$post['op'] && strtolower($post['email']) != 'sage' && !$thread['sage'] && ($config['reply_limit'] == 0 || $numposts['replies']+1 < $config['reply_limit'])) {

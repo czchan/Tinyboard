@@ -26,7 +26,8 @@ function load_twig() {
 	$loader->setPaths($config['dir']['template']);
 	$twig = new Twig_Environment($loader, array(
 		'autoescape' => false,
-		'cache' => "{$config['dir']['template']}/cache",
+		'cache' => is_writable('templates') && (!is_dir('templates/cache') || is_writable('templates/cache')) ?
+			"{$config['dir']['template']}/cache" : false,
 		'debug' => $config['debug']
 	));
 	$twig->addExtension(new Twig_Extensions_Extension_Tinyboard());
@@ -34,7 +35,7 @@ function load_twig() {
 }
 
 function Element($templateFile, array $options) {
-	global $config, $debug, $twig;
+	global $config, $debug, $twig, $build_pages;
 	
 	if (!$twig)
 		load_twig();
@@ -44,15 +45,23 @@ function Element($templateFile, array $options) {
 	}
 	
 	if (isset($options['body']) && $config['debug']) {
+		$_debug = $debug;
+		
 		if (isset($debug['start'])) {
-			$debug['time'] = '~' . round((microtime(true) - $debug['start']) * 1000, 2) . 'ms';
-			unset($debug['start']);
+			$_debug['time']['total'] = '~' . round((microtime(true) - $_debug['start']) * 1000, 2) . 'ms';
+			$_debug['time']['init'] = '~' . round(($_debug['start_debug'] - $_debug['start']) * 1000, 2) . 'ms';
+			unset($_debug['start']);
+			unset($_debug['start_debug']);
 		}
-		$debug['included'] = get_included_files();
-		$debug['memory'] = round(memory_get_usage(true) / (1024 * 1024), 2) . ' MiB';
+		if ($config['try_smarter'] && isset($build_pages) && !empty($build_pages))
+			$_debug['build_pages'] = $build_pages;
+		$_debug['included'] = get_included_files();
+		$_debug['memory'] = round(memory_get_usage(true) / (1024 * 1024), 2) . ' MiB';
+		$_debug['time']['db_queries'] = '~' . round($_debug['time']['db_queries'] * 1000, 2) . 'ms';
+		$_debug['time']['exec'] = '~' . round($_debug['time']['exec'] * 1000, 2) . 'ms';
 		$options['body'] .=
 			'<h3>Debug</h3><pre style="white-space: pre-wrap;font-size: 10px;">' .
-				str_replace("\n", '<br/>', utf8tohtml(print_r($debug, true))) .
+				str_replace("\n", '<br/>', utf8tohtml(print_r($_debug, true))) .
 			'</pre>';
 	}
 	

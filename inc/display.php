@@ -19,19 +19,23 @@ function format_bytes($size) {
 	return round($size, 2).$units[$i];
 }
 
-function doBoardListPart($list, $root) {
+function doBoardListPart($list, $root, &$boards) {
 	global $config;
 	
 	$body = '';
-	foreach ($list as $board) {
+	foreach ($list as $key => $board) {
 		if (is_array($board))
-			// $body .= ' [' . doBoardListPart($board, $root) . '] ';
-			$body .= ' <span class="sub">[' . doBoardListPart($board, $root) . ']</span> ';
+			$body .= ' <span class="sub" data-description="' . $key . '">[' . doBoardListPart($board, $root, $boards) . ']</span> ';
 		else {
-			if (($key = array_search($board, $list)) && gettype($key) == 'string') {
+			if (gettype($key) == 'string') {
 				$body .= ' <a href="' . $board . '">' . $key . '</a> /';
-			} else {			
-				$body .= ' <a href="' . $root . $board . '/' . $config['file_index'] . '">' . $board . '</a> /';
+			} else {
+				$title = '';
+				if (isset ($boards[$board])) {
+					$title = ' title="'.$boards[$board].'"';
+				}
+				
+				$body .= ' <a href="' . $root . $board . '/' . $config['file_index'] . '"'.$title.'>' . $board . '</a> /';
 			}
 		}
 	}
@@ -45,7 +49,13 @@ function createBoardlist($mod=false) {
 	
 	if (!isset($config['boards'])) return array('top'=>'','bottom'=>'');
 	
-	$body = doBoardListPart($config['boards'], $mod?'?/':$config['root']);
+	$xboards = listBoards();
+	$boards = array();
+	foreach ($xboards as $val) {
+		$boards[$val['uri']] = $val['title'];
+	}
+
+	$body = doBoardListPart($config['boards'], $mod?'?/':$config['root'], $boards);
 
 	if ($config['boardlist_wrap_bracket'] && !preg_match('/\] $/', $body))
 		$body = '[' . $body . ']';
@@ -74,6 +84,9 @@ function error($message, $priority = true, $debug_stuff = false) {
 	if ($config['debug'] && isset($db_error)) {
 		$debug_stuff = array_combine(array('SQLSTATE', 'Error code', 'Error message'), $db_error);
 	}
+
+	// Return the bad request header, necessary for AJAX posts
+	header($_SERVER['SERVER_PROTOCOL'] . ' 400 Bad Request');
 	
 	die(Element('page.html', array(
 		'config' => $config,
@@ -113,7 +126,7 @@ function pm_snippet($body, $len=null) {
 		$len = &$config['mod']['snippet_length'];
 	
 	// Replace line breaks with some whitespace
-	$body = str_replace('<br/>', '  ', $body);
+	$body = preg_replace('@<br/?>@i', '  ', $body);
 	
 	// Strip tags
 	$body = strip_tags($body);
@@ -219,23 +232,50 @@ function truncate($body, $url, $max_lines = false, $max_chars = false) {
 	return $body;
 }
 
-function bidi_cleanup($str){
-	# Removes all embedded RTL and LTR unicode formatting blocks in a string so that
-	# it can be used inside another without controlling its direction.
-	# More info: http://www.iamcal.com/understanding-bidirectional-text/
-	#
-	# LRE - U+202A - 0xE2 0x80 0xAA
-	# RLE - U+202B - 0xE2 0x80 0xAB
-	# LRO - U+202D - 0xE2 0x80 0xAD
-	# RLO - U+202E - 0xE2 0x80 0xAE
-	#
-	# PDF - U+202C - 0xE2 0x80 0xAC
-	#
+function bidi_cleanup($data) {
+	// Closes all embedded RTL and LTR unicode formatting blocks in a string so that
+	// it can be used inside another without controlling its direction.
+
 	$explicits	= '\xE2\x80\xAA|\xE2\x80\xAB|\xE2\x80\xAD|\xE2\x80\xAE';
 	$pdf		= '\xE2\x80\xAC';
-
-	$str = preg_replace("!(?<explicits>$explicits)|(?<pdf>$pdf)!", '', $str);
-	return $str;
+	
+	preg_match_all("!$explicits!",	$data, $m1, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
+	preg_match_all("!$pdf!", 	$data, $m2, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
+	
+	if (count($m1) || count($m2)){
+	
+		$p = array();
+		foreach ($m1 as $m){ $p[$m[0][1]] = 'push'; }
+		foreach ($m2 as $m){ $p[$m[0][1]] = 'pop'; }
+		ksort($p);
+	
+		$offset = 0;
+		$stack = 0;
+		foreach ($p as $pos => $type){
+	
+			if ($type == 'push'){
+				$stack++;
+			}else{
+				if ($stack){
+					$stack--;
+				}else{
+					# we have a pop without a push - remove it
+					$data = substr($data, 0, $pos-$offset)
+						.substr($data, $pos+3-$offset);
+					$offset += 3;
+				}
+			}
+		}
+	
+		# now add some pops if your stack is bigger than 0
+		for ($i=0; $i<$stack; $i++){
+			$data .= "\xE2\x80\xAC";
+		}
+	
+		return $data;
+	}
+	
+	return $data;
 }
 
 function secure_link_confirm($text, $title, $confirm_message, $href) {
@@ -271,35 +311,29 @@ function embed_html($link) {
 }
 
 class Post {
-	public function __construct($id, $thread, $subject, $email, $name, $trip, $capcode, $body, $time, $thumb, $thumbx, $thumby, $file, $filex, $filey, $filesize, $filename, $ip, $embed, $root=null, $mod=false) {
+	public function __construct($post, $root=null, $mod=false) {
 		global $config;
 		if (!isset($root))
 			$root = &$config['root'];
 		
-		$this->id = $id;
-		$this->thread = $thread;
-		$this->subject = utf8tohtml($subject);
-		$this->email = $email;
-		$this->name = utf8tohtml($name);
-		$this->trip = $trip;
-		$this->capcode = $capcode;
-		$this->body = $body;
-		$this->time = $time;
-		$this->thumb = $thumb;
-		$this->thumbx = $thumbx;
-		$this->thumby = $thumby;
-		$this->file = $file;
-		$this->filex = $filex;
-		$this->filey = $filey;
-		$this->filesize = $filesize;
-		$this->filename = $filename;
-		$this->ip = $ip;
-		$this->embed = $embed;
-		$this->root = $root;
+		foreach ($post as $key => $value) {
+			$this->{$key} = $value;
+		}
+		
+		$this->subject = utf8tohtml($this->subject);
+		$this->name = utf8tohtml($this->name);
 		$this->mod = $mod;
+		$this->root = $root;
 		
 		if ($this->embed)
 			$this->embed = embed_html($this->embed);
+		
+		$this->modifiers = extract_modifiers($this->body_nomarkup);
+		
+		if ($config['always_regenerate_markup']) {
+			$this->body = $this->body_nomarkup;
+			markup($this->body);
+		}
 		
 		if ($this->mod)
 			// Fix internal links
@@ -365,6 +399,10 @@ class Post {
 		return $built;
 	}
 	
+	public function ratio() {
+		return fraction($this->filewidth, $this->fileheight, ':');
+	}
+	
 	public function build($index=false) {
 		global $board, $config;
 		
@@ -373,41 +411,34 @@ class Post {
 };
 
 class Thread {
-	public function __construct($id, $subject, $email, $name, $trip, $capcode, $body, $time, $thumb, $thumbx, $thumby, $file, $filex, $filey, $filesize, $filename, $ip, $sticky, $locked, $bumplocked, $embed, $root=null, $mod=false, $hr=true) {
+	public function __construct($post, $root = null, $mod = false, $hr = true) {
 		global $config;
 		if (!isset($root))
 			$root = &$config['root'];
 		
-		$this->id = $id;
-		$this->subject = utf8tohtml($subject);
-		$this->email = $email;
-		$this->name = utf8tohtml($name);
-		$this->trip = $trip;
-		$this->capcode = $capcode;
-		$this->body = $body;
-		$this->time = $time;
-		$this->thumb = $thumb;
-		$this->thumbx = $thumbx;
-		$this->thumby = $thumby;
-		$this->file = $file;
-		$this->filex = $filex;
-		$this->filey = $filey;
-		$this->filesize = $filesize;
-		$this->filename = $filename;
+		foreach ($post as $key => $value) {
+			$this->{$key} = $value;
+		}
+		
+		$this->subject = utf8tohtml($this->subject);
+		$this->name = utf8tohtml($this->name);
+		$this->mod = $mod;
+		$this->root = $root;
+		$this->hr = $hr;
+
+		$this->posts = array();
 		$this->omitted = 0;
 		$this->omitted_images = 0;
-		$this->posts = array();
-		$this->ip = $ip;
-		$this->sticky = $sticky;
-		$this->locked = $locked;
-		$this->bumplocked = $bumplocked;
-		$this->embed = $embed;
-		$this->root = $root;
-		$this->mod = $mod;
-		$this->hr = $hr;
 		
 		if ($this->embed)
 			$this->embed = embed_html($this->embed);
+		
+		$this->modifiers = extract_modifiers($this->body_nomarkup);
+		
+		if ($config['always_regenerate_markup']) {
+			$this->body = $this->body_nomarkup;
+			markup($this->body);
+		}
 		
 		if ($this->mod)
 			// Fix internal links
@@ -471,7 +502,7 @@ class Thread {
 					$built .= ' <a title="'._('Make thread sticky').'" href="?/' . secure_link($board['dir'] . 'sticky/' . $this->id) . '">' . $config['mod']['link_sticky'] . '</a>';
 			
 			if (hasPermission($config['mod']['bumplock'], $board['uri'], $this->mod))
-				if ($this->bumplocked)
+				if ($this->sage)
 					$built .= ' <a title="'._('Allow thread to be bumped').'" href="?/' . secure_link($board['dir'] . 'bumpunlock/' . $this->id) . '">' . $config['mod']['link_bumpunlock'] . '</a>';
 				else
 					$built .= ' <a title="'._('Prevent thread from being bumped').'" href="?/' . secure_link($board['dir'] . 'bumplock/' . $this->id) . '">' . $config['mod']['link_bumplock'] . '</a>';
@@ -497,7 +528,7 @@ class Thread {
 	}
 	
 	public function ratio() {
-		return fraction($this->filex, $this->filey, ':');
+		return fraction($this->filewidth, $this->fileheight, ':');
 	}
 	
 	public function build($index=false, $isnoko50=false) {

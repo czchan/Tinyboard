@@ -77,21 +77,23 @@
 	// Database driver (http://www.php.net/manual/en/pdo.drivers.php)
 	// Only MySQL is supported by Tinyboard at the moment, sorry.
 	$config['db']['type'] = 'mysql';
-	// Hostname or IP address
+	// Hostname, IP address or Unix socket (prefixed with ":")
 	$config['db']['server'] = 'localhost';
+	// Example: Unix socket
+	// $config['db']['server'] = ':/tmp/mysql.sock';
 	// Login
 	$config['db']['user'] = '';
 	$config['db']['password'] = '';
 	// Tinyboard database
 	$config['db']['database'] = '';
-	// Table prefix
+	// Table prefix (optional)
 	$config['db']['prefix'] = '';
-	// Use a persistent connection (experimental)
+	// Use a persistent database connection when possible
 	$config['db']['persistent'] = false;
 	// Anything more to add to the DSN string (eg. port=xxx;foo=bar)
 	$config['db']['dsn'] = '';
-	// Timeout duration in seconds (not all drivers support this)
-	$config['db']['timeout'] = 5;
+	// Connection timeout duration in seconds
+	$config['db']['timeout'] = 30;
 
 /*
  * ====================
@@ -153,6 +155,9 @@
 
 	// Make this something long and random for security.
 	$config['cookies']['salt'] = 'abcdefghijklmnopqrstuvwxyz09123456789!@#$%^&*()';
+
+	// Whether or not you can access the mod cookie in JavaScript. Most users should not need to change this.
+	$config['cookies']['httponly'] = true;
 
 	// Used to salt secure tripcodes ("##trip") and poster IDs (if enabled).
 	$config['secure_trip_salt'] = ')(*&^%$#@!98765432190zyxwvutsrqponmlkjihgfedcba';
@@ -354,6 +359,8 @@
 	// Allow "uploading" images via URL as well. Users can enter the URL of the image and then Tinyboard will
 	// download it. Not usually recommended.
 	$config['allow_upload_by_url'] = false;
+	// The timeout for the above, in seconds.
+	$config['upload_by_url_timeout'] = 15;
 
 	// A wordfilter (sometimes referred to as just a "filter" or "censor") automatically scans users’ posts
 	// as they are submitted and changes or censors particular words or phrases.
@@ -390,6 +397,11 @@
 
 	// When true, users are instead presented a selectbox for email. Contains, blank, noko and sage.
 	$config['field_email_selectbox'] = false;
+
+	// Attach country flags to posts. Requires the PHP "geoip" extension to be installed:
+	// http://www.php.net/manual/en/intro.geoip.php. In the future, maybe I will find and include a proper
+	// pure-PHP geolocation library.
+	$config['country_flags'] = false;
 
 	// Require users to see the ban page at least once for a ban even if it has since expired.
 	$config['require_ban_view'] = true;
@@ -452,10 +464,10 @@
  */
 
 	// "Wiki" markup syntax ($config['wiki_markup'] in pervious versions):
-	$config['markup'][] = array("/'''([^<]+?)'''/", "<strong>\$1</strong>");
-	$config['markup'][] = array("/''([^<]+?)''/", "<em>\$1</em>");
-	$config['markup'][] = array("/\*\*([^<]+?)\*\*/", "<span class=\"spoiler\">\$1</span>");
-	$config['markup'][] = array("/^[ |\t]*==([^<]+?)==[ |\t]*$/m", "<span class=\"heading\">\$1</span>");
+	$config['markup'][] = array("/'''(.+?)'''/", "<strong>\$1</strong>");
+	$config['markup'][] = array("/''(.+?)''/", "<em>\$1</em>");
+	$config['markup'][] = array("/\*\*(.+?)\*\*/", "<span class=\"spoiler\">\$1</span>");
+	$config['markup'][] = array("/^[ |\t]*==(.+?)==[ |\t]*$/m", "<span class=\"heading\">\$1</span>");
 
 	// Highlight PHP code wrapped in <code> tags (PHP 5.3+)
 	// $config['markup'][] = array(
@@ -464,6 +476,16 @@
 	// 		return highlight_string(html_entity_decode($matches[1]), true);
 	// 	}
 	// );
+
+	// Repair markup with HTML Tidy. This may be slower, but it solves nesting mistakes. Tinyboad, at the
+	// time of writing this, can not prevent out-of-order markup tags (eg. "**''test**'') without help from
+	// HTML Tidy.
+	$config['markup_repair_tidy'] = false;
+
+	// Always regenerate markup. This isn't recommended and should only be used for debugging; by default,
+	// Tinyboard only parses post markup when it needs to, and keeps post-markup HTML in the database. This
+	// will significantly impact performance when enabled.
+	$config['always_regenerate_markup'] = false;
 
 /*
  * ====================
@@ -594,7 +616,7 @@
 	// Display the aspect ratio of uploaded files.
 	$config['show_ratio'] = false;
 	// Display the file's original filename.
-	$config['show_filename']= true;
+	$config['show_filename'] = true;
 
 	// Display image identification links using regex.info/exif, TinEye and Google Images.
 	$config['image_identification'] = false;
@@ -637,15 +659,14 @@
 	// Allow unfiltered HTML in board subtitle. This is useful for placing icons and links.
 	$config['allow_subtitle_html'] = false;
 
-	/* 
-	 * Enable oekaki (お絵描き). This puts a drawing field on your board. You can either
-	 * enable it globally or enable it on a per-board basis. Oekaki's color field
-	 * can be greatly enhanced by installing jscolor from http://jscolor.com/ and installing it in js/
-	 * If you enable oekaki, please remember to also enable its script with:
-	 * $config['additional_javascript'][] = 'js/oekaki.js';
-	 */
+	// Oekaki - To enable oekaki, just enable its script with:
+	// $config['additional_javascript'][] = 'js/oekaki.js';
+	// Color selection in oekaki can be greatly improved by including the bundled jscolor script.
+	// $config['additional_javascript'][] = 'js/jscolor/jscolor.js';
+	// $config['oekaki'] holds Oekaki options, which are currently just default canvas size.
 
-	$config['oekaki'] = false;
+	$config['oekaki']['height'] = 250;
+	$config['oekaki']['width'] = 500;
 
 /*
  * ====================
@@ -760,6 +781,17 @@
 	// Optional HTML to append to "You are banned" pages. For example, you could include instructions and/or
 	// a link to an email address or IRC chat room to appeal the ban.
 	$config['ban_page_extra'] = '';
+	
+	// Display flags (when available). This config option has no effect unless poster flags are enabled (see
+	// $config['country_flags']). Disable this if you want all previously-assigned flags to be hidden.
+	$config['display_flags'] = true;
+	
+	// Location of post flags/icons (where "%s" is the flag name). Defaults to static/flags/%s.png.
+	// $config['uri_flags'] = 'http://static.example.org/flags/%s.png';
+
+	// Width and height (and more?) of post flags. Can be overridden with the Tinyboard post modifier:
+	// <tinyboard flag style>.
+	$config['flag_style'] = 'width:16px;height:11px;';
 
 /*
  * ====================
@@ -970,7 +1002,7 @@
 	// $config['url_favicon'] = '/favicon.gif';
 	
 	// EXPERIMENTAL: Try not to build pages when we shouldn't have to.
-	$config['try_smarter'] = false;
+	$config['try_smarter'] = true;
 
 /*
  * ====================
@@ -1323,6 +1355,21 @@
 	// 	// return an error (reject post)
 	// 	return 'Sorry, you cannot post that!';
 	// });
+
+/*
+ * =============
+ *  API settings
+ * =============
+ */
+
+	// Whether or not to enable the 4chan-compatible API, disabled by default. See
+	// https://github.com/4chan/4chan-API for API specification.
+	$config['api']['enabled'] = false;
+
+	// Extra fields in to be shown in the array that are not in the 4chan-API. You can get these by taking a
+	// look at the schema for posts_ tables. The array should be formatted as $db_column => $translated_name.
+	// Example: Adding the pre-markup post body to the API as "com_nomarkup".
+	// $config['api']['extra_fields'] = array('body_nomarkup' => 'com_nomarkup');
 
 /*
  * ====================

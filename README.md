@@ -8,11 +8,12 @@ https://pl.vichan.net/ (Polish) and http://vichan.net/ (International; may be ou
 
 It contains many changes from original Tinyboard, mainly in frontend area.
 
+Support and announcements: https://int.vichan.net/devel/
+
 About
 ------------
-Tinyboard is a light-weight, fast, highly configurable and user-friendly
-imageboard software package released under a non-restrictive open-source
-license. It is written in PHP and has few dependencies.
+Tinyboard is a free light-weight, fast, highly configurable and user-friendly
+imageboard software package. It is written in PHP and has few dependencies.
 
 Requirements
 ------------
